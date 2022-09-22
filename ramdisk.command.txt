@@ -1,0 +1,334 @@
+#!/bin/bash
+#
+# ramdisk.command for MacOS
+#
+# On startup, creates a ramdisk and copies the contents of WIP folder into it.
+# Every 11 minutes thereafter, syncs the contents of ramdisk back to the WIP folder on hard disk
+#
+# to set up:
+#
+#  1) put this file as ramdisk.command in your home directory
+#
+#  2) modify variables (disk location, ramdisk size, etc) to suit your needs
+#
+#  3) make it executable
+#     chmod u+x ramdisk.command 
+#
+#  4) grant /bin/bash full disk access
+#     System Preferences - Security & Privacy - Privacy tab - Full Disk Access
+#     add /bin/bash
+#     (in the dialog, select Macintosh HD, then press shift-command-period to show hidden)
+#     select /bin/bash
+#
+#  5) create the hard disk folder (diskwip) if it does not already exist
+#     create hard disk folder
+#     copy (not move) some test content into the disk folder
+#
+#  6) test by running manually
+#     double-clicking on file should open shell window & execute.
+#     when it shows Process Completed, close the window
+#     check disk locations for expected content (ramdisk exists, is primed)
+#     check log file for expected content
+#     modify something in the ramdisk (remove a file, or similar)
+#     double-click on file again to run
+#     verify that the ramdisk change has been reflected on the disk folder
+#     check log file for expected content
+#
+#  7) resolve any problems and retest until you are willing to trust your data to it.
+#
+#  8) configure to run on login
+#     system preferences - users & groups - you - login items
+#     press + then select ramdisk.command
+#
+#  9) verify that it runs on login
+#     shut down, then power on & login
+#     verify that ramdisk is created
+#     if the command window is open, when it shows Process Completed, close the window
+#     check log file for expected content
+#
+# 10) setup to run from launchd
+#     create properties list file in ~/Library/LaunchAgents/ramdisk.plist
+#     (per user library location, not systemwide)
+#
+# <?xml version="1.0" encoding="UTF-8"?>
+# <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+#  <plist version="1.0">
+#  <dict>
+#    <key>Label</key>
+#    <string>ramdisk</string>
+#    <key>ProgramArguments</key>
+#    <array>
+#        <string>/Users/contra/ramdisk.command</string>
+#    </array>
+#    <key>StandardErrorPath</key>
+#      <string>/Users/contra/ramdisk.stdout.log</string>
+#    <key>StandardOutPath</key>
+#      <string>/Users/contra/ramdisk.stderr.log</string>
+#    <key>StartInterval</key>
+#      <integer>660</integer>
+# </dict>
+# </plist>
+#
+# 11) check that it runs every 11 minutes or so
+#     wait 15 minutes and inspect logfile for expected output
+#
+# 12) don't forget that changes are only copied to hard disk every 11 minutes or so. 
+#     don't shut down your Mac less than 15 minutes after making a change to anything on the ramdisk
+#     don't accidentally unmount the ramdisk. Any changes since last sync will be lost.
+#     enjoy the speed
+#
+# 13) if you need to run it immediately for some reason,
+#     double-click the ramdisk.command file,
+#     if the command window is open, when it shows Process Completed, close the window
+#
+# Known bugs & limitations
+#
+#   it would be better if the ramdisk could not be inadvertently dismounted
+#
+#   it would be better if the sync could be run automatically at logout, avoiding the chance to
+#   lose changes
+#
+#   no check is made for disk capacity either priming or syncing the ramdisk
+#
+#   no check is made for availability of amount of RAM allocated to ramdisk
+#
+#   at login and when run manually, the command window is left open and must be closed manually
+#
+#   on startup, check for hard disk folder is made only twice.  If your system is slower to
+#   start or the disk slower to mount, then you may wish to extend the delay to retry or else
+#   make a more sophisticated approach and attempt more retries
+#
+# Further Information
+#
+#   man launchd
+#   man launchctl
+#   https://support.apple.com/en-au/guide/terminal/apdc6c1077b-5d5d-4d35-9c19-60f2397b2369/mac
+#
+#
+ME=ramdisk.command
+MEC=/Users/contra/ramdisk.command
+RAMDISK=/Volumes/RAM1
+RAMFOLDER=/Volumes/RAM1/ramwip
+DISKFOLDER=/Volumes/Work7/diskwip
+LOGFILE=/Users/contra/ramdisk.log
+ERRFILE=/Users/contra/ramdisk.err
+CX=0
+PROGRESS=0
+echo $ME 1000 $(date) >> $LOGFILE
+CX=$(ps -ax | grep $ME | grep -v grep | wc -l)
+if [ $CX -gt 2 ]
+then
+  echo $ME 1001 FATAL already running >> $LOGFILE
+  exit
+fi
+CX=0
+#
+# check whether any other rsyncs are already running
+# more efficient to reduce disk contention and try again later
+#
+CX=$(ps -ax | grep rsync | grep -v colorsync | grep -v grep | wc -l)
+if [ $CX -gt 0 ]
+then
+  echo $CX
+  echo $ME 1002 FATAL other rsync already running >> $LOGFILE
+  exit
+fi
+CX=0
+#
+# check whether any ffmpegs are running
+# the script which launches them uses the ramdisk as source & destination
+# copying while they're running will produce copies of temp files
+#
+CX=$(ps -ax | grep ffmpeg | grep -v grep | wc -l)
+if [ $CX -gt 0 ]
+then
+  echo $CX
+  echo $ME 1003 FATAL ffmpeg also running >> $LOGFILE
+  exit
+fi
+CX=0
+#
+# check whether any youtube-dls are running
+# avoid copying & misaligning temp files
+#
+CX=$(ps -ax | grep youtube-dl | grep -v grep | wc -l)
+if [ $CX -gt 0 ]
+then
+  echo $CX
+  echo $ME 1004 FATAL youtube-dl also running >> $LOGFILE
+  exit
+fi
+CX=0
+#
+#
+echo $ME 1010 $(ls -l $MEC ) >> $LOGFILE
+if [ -f $ERRFILE ]
+then
+  rm -f $ERRFILE
+  if [ -f $ERRFILE ]
+  then
+    echo $ME 1030 FATAL cannot remove old error file >> $LOGFILE
+  else
+    PROGRESS=10
+  fi
+else
+  echo $ME 1040 no previous error file >> $LOGFILE
+  PROGRESS=10
+fi
+
+if [ $PROGRESS -eq 10 ]
+then
+  if [ ! -d $DISKFOLDER ]
+  then
+    sleep 15
+    if [ ! -d $DISKFOLDER ]
+    then
+
+      # might be still booting: sleep then try again, but only once
+      echo $ME 1050 $DISKFOLDER retrying >> $LOGFILE
+      sleep 60
+      if [ ! -d $DISKFOLDER ]
+      then
+        echo $ME 1052 FATAL no $DISKFOLDER store to copy >> $LOGFILE
+      else
+        echo $ME 1055 $DISKFOLDER store exists >> $LOGFILE
+        PROGRESS=20
+      fi
+    else
+      echo $ME 1060 $DISKFOLDER store exists >> $LOGFILE
+      PROGRESS=20
+    fi
+  else
+    echo $ME 1063 $DISKFOLDER store exists >> $LOGFILE
+    PROGRESS=20
+  fi
+fi
+
+if [ $PROGRESS -eq 20 ]
+then
+  if [ ! -d $RAMDISK ]
+  then
+    echo $ME 1070 creating ramdisk >> $LOGFILE
+    #diskutil erasevolume HFSX RAM1 `hdiutil attach -nomount ram://134217728` >> $ERRFILE 2>&1
+    diskutil erasevolume HFSX RAM1 `hdiutil attach -nomount ram://167772160` >> $ERRFILE 2>&1
+    #diskutil erasevolume HFSX RAM1 `hdiutil attach -nomount ram://201326592` >> $ERRFILE 2>&1
+    sleep 5
+    if [ ! -d $RAMDISK ]
+    then
+      echo $ME 1080 FATAL unable to create ramdisk $RAMDISK >> $LOGFILE
+    else
+      cat $ERRFILE >> $LOGFILE
+      rm -f $ERRFILE
+      if [ -f $ERRFILE ]
+      then
+        echo $ME 1090 FATAL cannot remove diskutil output file >> $LOGFILE
+      else
+        PROGRESS=30
+      fi
+    fi
+  else
+    echo $ME 1100 $RAMDISK already exists >> $LOGFILE
+    PROGRESS=30
+  fi
+fi
+
+if [ $PROGRESS -eq 30 ]
+then
+  if [ ! -d $RAMFOLDER ]
+  then
+    echo $ME 1110 creating $RAMFOLDER >> $LOGFILE
+    #mkdir $RAMFOLDER &> $LOGFILE
+    mkdir $RAMFOLDER
+    if [ ! -d $RAMFOLDER ]
+    then
+      echo $ME 1120 FATAL unable to create $RAMFOLDER >> $LOGFILE
+    else
+      PROGRESS=40
+    fi
+  else 
+    echo $ME 1130 $RAMFOLDER folder already exists >> $LOGFILE 
+    PROGRESS=40
+  fi
+fi
+
+if [ $PROGRESS -eq 40 ]
+then
+  CT=$( ls $RAMFOLDER | wc -l )
+  if [ $CT -gt 1 ]
+  then
+    echo $ME 1140 $RAMFOLDER folder is not empty >> $LOGFILE 
+    PROGRESS=50
+  else
+    echo $ME 1150 $RAMFOLDER folder is empty, priming cache >> $LOGFILE 
+    rsync -a $DISKFOLDER/ $RAMFOLDER >> $ERRFILE 2>&1
+    sleep 3
+    cat $ERRFILE >> $LOGFILE
+    rm -f $ERRFILE
+    if [ -f $ERRFILE ]
+    then
+      echo $ME 1160 FATAL cannot remove output file >> $LOGFILE
+    else
+      CT=$( ls $RAMFOLDER | wc -l )
+      if [ $CT -gt 3 ]
+      then
+        echo $ME 1170 cache prime successful, $CT items >> $LOGFILE 
+        PROGRESS=100
+        #nothing to sync if we just copied from disk to ram
+      else
+        echo $ME 1180 FATAL cache prime failed, $CT items >> $LOGFILE 
+      fi
+    fi
+  fi
+fi
+
+if [ $PROGRESS -eq 50 ]
+then
+  # all setup already done, assume we are syncing back to diskwip
+  echo $ME 1190 syncing ramdisk cache to disk store >> $LOGFILE
+  rsync -rtpgov --delete $RAMFOLDER/ $DISKFOLDER >> $ERRFILE 2>&1 
+  sleep 3
+  cat $ERRFILE >> $LOGFILE
+  rm -f $ERRFILE
+  if [ -f $ERRFILE ]
+  then
+    echo $ME 1200 FATAL cannot remove rsync sync output file >> $LOGFILE
+  else
+    echo $ME 1210 sync complete >> $LOGFILE
+    PROGRESS=100
+  fi
+else
+  echo $ME 1220 $PROGRESS skipping sync >> $LOGFILE
+  PROGRESS=100
+fi
+
+#minimum runtime 10s otherwise launchd  may try to restart
+echo $ME 1330 sleeping min launchd runtime  >> $LOGFILE
+sleep 11
+LOGSIZE=$( ls -s $LOGFILE | cut -d " " -f 1 )
+# size in blocks, leave enough to have a couple of days' records
+echo $ME 1340 logfile size $LOGSIZE >> $LOGFILE
+if [ $LOGSIZE -gt "500" ]
+then
+  echo $ME 1350 logfile size $LOGSIZE, rotating logfile >> $LOGFILE
+  if [ -f $LOGFILE.old ]
+  then
+    rm -f $LOGFILE.old
+  fi
+  if [ -f $LOGFILE.old ]
+  then
+    echo $ME 1360 FATAL unable to delete old log file >> $LOGFILE
+    exit
+  fi
+  mv $LOGFILE $LOGFILE.old
+  if [ ! -f $LOGFILE.old ]
+  then
+    echo $ME 1370 FATAL unable to rename old log file >> $LOGFILE
+    exit
+  fi
+  echo $ME 1380 logfile rotated >> $LOGFILE
+fi
+echo $ME 1400 $(date) >> $LOGFILE
+
+#
+# the end
+#
